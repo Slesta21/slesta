@@ -11,9 +11,9 @@
     Cross-Origin-Opener-Policy = "same-origin"
     Cross-Origin-Embedder-Policy = "credentialless"
 
-# v110: Account-Tracking – läuft alle 10 Minuten: aktive Spieler jedes Mal, alle anderen alle 30 Minuten
+# v149: Account-Tracking – alle 5 Min.: wer gerade Ranked spielt jedes Mal, alle anderen ca. alle 15 Min., lange Inaktive alle 2 Std.
 [functions."bs-cron"]
-  schedule = "*/15 * * * *"
+  schedule = "*/5 * * * *"
 
 # v117: Community-Meta – Battlelogs von Top-Spielern für Tagesplan & Upgrade-Planer
 [functions."bs-sample"]

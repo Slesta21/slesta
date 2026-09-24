@@ -195,7 +195,7 @@ async function syncTag(tag, mitProfil, vorab) {
     await sb('bs_players?tag=eq.' + tag, { method: 'PATCH', body: upd, headers: { Prefer: 'return=minimal' } });
   }
   if (profil) await rankedSpeichern(tag, profil, rkNeu ? null : letzter);
-  return { profil, neu: zeilen.length };
+  return { profil, neu: zeilen.length, rkZeit };
 }
 
 /* ════ v117 · Community-Meta ════
@@ -289,31 +289,60 @@ async function metaAufraeumen() {
 // wenn neue Ranked-Matches dazugekommen sind (für den Elo-Verlauf in bs_ranked).
 // Accounts, die 30 Tage niemand geöffnet hat, werden pausiert.
 // ════════════════════════════════════════════════════════════════════
+/* ── Wer spielt gerade Ranked? Kleine Liste in Supabase Storage (kein Datenbank-Umbau nötig) ── */
+const INTERN = 'bs-intern';
+function sbKopfS(extra) { return Object.assign({ apikey: SB_KEY }, /^eyJ/.test(SB_KEY) ? { Authorization: 'Bearer ' + SB_KEY } : {}, extra || {}); }
+async function heissLesen() {
+  try {
+    const r = await mitZeit(fetch(SB_URL + '/storage/v1/object/' + INTERN + '/heiss.json', { headers: sbKopfS() }), 4000);
+    return r.ok ? JSON.parse(await r.text()) || {} : {};
+  } catch (e) { return {}; }
+}
+async function heissSchreiben(obj) {
+  const put = () => fetch(SB_URL + '/storage/v1/object/' + INTERN + '/heiss.json', { method: 'POST', headers: sbKopfS({ 'Content-Type': 'application/json', 'x-upsert': 'true' }), body: JSON.stringify(obj) });
+  let r = await put();
+  if (!r.ok) {
+    await fetch(SB_URL + '/storage/v1/bucket', { method: 'POST', headers: sbKopfS({ 'Content-Type': 'application/json' }), body: JSON.stringify({ id: INTERN, name: INTERN, public: false }) }).catch(() => 0);
+    r = await put();
+  }
+}
+
+/* v149: Bestätigte Accounts werden auch ohne Seitenbesuch weiter getrackt.
+   Läuft alle 5 Minuten:
+   - wer gerade Ranked spielt (letzte Ranked-Runde < 30 Min.): jedes Mal → Elo pro Set
+   - alle anderen: etwa alle 15 Minuten
+   - Accounts, deren Profil seit 30 Tagen niemand geöffnet hat: etwa alle 2 Stunden */
 exports.handler = async () => {
   if (!BS_KEY || !SB_KEY) return { statusCode: 200, body: 'not configured' };
-  const start = Date.now();
-  const grenze = new Date(Date.now() - 30 * 864e5).toISOString();
-  /* Wer die Seite in den letzten 3 Stunden offen hatte, spielt vermutlich gerade: bei jedem Lauf (alle 10 Min.) holen.
-     Alle anderen wie bisher höchstens alle 30 Minuten. */
-  const aktivAb = new Date(Date.now() - 3 * 36e5).toISOString(), faelligAb = new Date(Date.now() - 28 * 6e4).toISOString();
-  const [aktive, faellige] = await Promise.all([
-    sb('bs_players?select=tag,daily_day,fails&last_seen=gte.' + aktivAb + '&order=last_fetch.asc.nullsfirst&limit=30'),
-    sb('bs_players?select=tag,daily_day,fails&last_seen=gte.' + grenze + '&or=(last_fetch.is.null,last_fetch.lt.' + faelligAb + ')&order=last_fetch.asc.nullsfirst&limit=60')
+  const start = Date.now(), jetzt = Date.now();
+  const iso = ms => new Date(ms).toISOString();
+  const grenze = iso(jetzt - 30 * 864e5);
+  const heiss = await heissLesen(), heissTags = Object.keys(heiss).filter(t => heiss[t] > jetzt && TAG_OK.test(t));
+  const [hRows, faellig, alt] = await Promise.all([
+    heissTags.length ? sb('bs_players?select=tag,daily_day,fails&tag=in.(' + heissTags.join(',') + ')') : [],
+    sb('bs_players?select=tag,daily_day,fails&last_seen=gte.' + grenze + '&or=(last_fetch.is.null,last_fetch.lt.' + iso(jetzt - 13 * 6e4) + ')&order=last_fetch.asc.nullsfirst&limit=60'),
+    sb('bs_players?select=tag,daily_day,fails&or=(last_seen.is.null,last_seen.lt.' + grenze + ')&last_fetch=lt.' + iso(jetzt - 115 * 6e4) + '&order=last_fetch.asc.nullsfirst&limit=15')
   ]);
   const gesehen = {}, liste = [];
-  (aktive || []).concat(faellige || []).forEach(p => { if (!gesehen[p.tag]) { gesehen[p.tag] = 1; liste.push(p); } });
-  const tag = heute();
+  (hRows || []).concat(faellig || [], alt || []).forEach(p => { if (!gesehen[p.tag]) { gesehen[p.tag] = 1; liste.push(p); } });
+  const tag = heute(), neuHeiss = {};
+  heissTags.forEach(t => { neuHeiss[t] = heiss[t]; });
   let ok = 0, fehler = 0, i = 0;
   async function arbeiter() {
-    while (i < (liste || []).length && Date.now() - start < 21000) {
+    while (i < liste.length && Date.now() - start < 21000) {
       const p = liste[i++];
-      try { await syncTag(p.tag, p.daily_day !== tag); ok++; }
-      catch (e) {
+      try {
+        const r = await syncTag(p.tag, p.daily_day !== tag);
+        ok++;
+        if (r && r.rkZeit && Date.now() - Date.parse(r.rkZeit) < 30 * 6e4) neuHeiss[p.tag] = Date.now() + 25 * 6e4;
+      } catch (e) {
         fehler++;
         try { await sb('bs_players?tag=eq.' + p.tag, { method: 'PATCH', body: { last_fetch: new Date().toISOString(), fails: (p.fails || 0) + 1 }, headers: { Prefer: 'return=minimal' } }); } catch (x) {}
       }
     }
   }
   await Promise.all([arbeiter(), arbeiter(), arbeiter(), arbeiter(), arbeiter(), arbeiter()]);
-  return { statusCode: 200, body: JSON.stringify({ ok, fehler, ms: Date.now() - start }) };
+  Object.keys(neuHeiss).forEach(t => { if (neuHeiss[t] <= Date.now()) delete neuHeiss[t]; });
+  if (JSON.stringify(neuHeiss) !== JSON.stringify(heiss)) { try { await heissSchreiben(neuHeiss); } catch (e) {} }
+  return { statusCode: 200, body: JSON.stringify({ ok, fehler, heiss: Object.keys(neuHeiss).length, ms: Date.now() - start }) };
 };

@@ -195,7 +195,7 @@ async function syncTag(tag, mitProfil, vorab) {
     await sb('bs_players?tag=eq.' + tag, { method: 'PATCH', body: upd, headers: { Prefer: 'return=minimal' } });
   }
   if (profil) await rankedSpeichern(tag, profil, rkNeu ? null : letzter);
-  return { profil, neu: zeilen.length };
+  return { profil, neu: zeilen.length, rkZeit };
 }
 
 /* ════ v117 · Community-Meta ════
