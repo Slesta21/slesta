@@ -16,18 +16,59 @@ let csvCache = null;
 let csvCacheTs = 0;
 let csvFetching = null;
 
+/* Aus einem Bearbeiten-/Veröffentlichen-Link einen CSV-Link machen – und eine zweite Variante als Ausweich. */
+function csvUrls(raw) {
+  const u = String(raw || '').trim();
+  const gidM = u.match(/[#&?]gid=(\d+)/), gid = gidM ? gidM[1] : null;
+  const pub = u.match(/\/spreadsheets\/d\/e\/([\w-]+)/);
+  if (pub) {
+    const basis = 'https://docs.google.com/spreadsheets/d/e/' + pub[1] + '/pub?output=csv' + (gid ? '&gid=' + gid : '');
+    return /output=csv/.test(u) ? [u, basis] : [basis];
+  }
+  const id = u.match(/\/spreadsheets\/d\/([\w-]+)/);
+  if (id) {
+    const exp = 'https://docs.google.com/spreadsheets/d/' + id[1] + '/export?format=csv' + (gid ? '&gid=' + gid : '');
+    const gviz = 'https://docs.google.com/spreadsheets/d/' + id[1] + '/gviz/tq?tqx=out:csv' + (gid ? '&gid=' + gid : '');
+    return /format=csv|out:csv|output=csv/.test(u) ? [...new Set([u, exp, gviz])] : [exp, gviz];
+  }
+  return [u];
+}
+function sheetFehler(code, detail) { const e = new Error(code + (detail ? ': ' + detail : '')); e.code = code; return e; }
+async function holeEinmal(url, ms) {
+  const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'User-Agent': 'Mozilla/5.0 Slesdrafts' } });
+    if (!r.ok) throw sheetFehler('sheet-http-' + r.status);
+    const text = await r.text();
+    const kopf = text.slice(0, 300).trim().toLowerCase();
+    /* Google liefert eine Login- oder Fehlerseite statt CSV, wenn das Sheet nicht (mehr) öffentlich ist */
+    if (kopf.startsWith('<!doctype') || kopf.startsWith('<html') || kopf.indexOf('<head') >= 0) throw sheetFehler('sheet-not-public');
+    if (text.length < 20) throw sheetFehler('sheet-empty');
+    return text;
+  } catch (e) {
+    if (e.name === 'AbortError') throw sheetFehler('sheet-timeout');
+    throw e.code ? e : sheetFehler('sheet-network', e.message);
+  } finally { clearTimeout(timer); }
+}
 async function fetchCSV(sheetUrl, force) {
   const now = Date.now();
   if (!force && csvCache && (now - csvCacheTs) < CSV_TTL) return csvCache;
   if (!force && csvFetching) return csvFetching;
   csvFetching = (async () => {
     try {
-      const response = await fetch(sheetUrl);
-      if (!response.ok) throw new Error('Sheet fetch failed: HTTP ' + response.status);
-      const text = await response.text();
-      csvCache = text;
-      csvCacheTs = Date.now();
-      return text;
+      const urls = csvUrls(sheetUrl), start = Date.now();
+      let letzterFehler = null;
+      for (const url of urls) {
+        const rest = 7500 - (Date.now() - start);
+        if (rest < 1500) break;
+        try {
+          const text = await holeEinmal(url, rest);
+          csvCache = text;
+          csvCacheTs = Date.now();
+          return text;
+        } catch (e) { letzterFehler = e; }
+      }
+      throw letzterFehler || sheetFehler('sheet-timeout');
     } finally {
       csvFetching = null;
     }
@@ -111,6 +152,17 @@ exports.handler = async function(event, context) {
     }
 
     const sheetUrl = process.env.GOOGLE_SHEET_URL;
+    /* ?diag=1 zeigt, woran es hängt – ohne die Sheet-Adresse preiszugeben */
+    if (params.diag === '1') {
+      const info = { gesetzt: !!sheetUrl, varianten: sheetUrl ? csvUrls(sheetUrl).length : 0, cacheAlterSek: csvCacheTs ? Math.round((Date.now() - csvCacheTs) / 1000) : null };
+      if (sheetUrl) {
+        const t0 = Date.now();
+        try { const text = await fetchCSV(sheetUrl, true); info.ok = true; info.zeilen = text.split('\n').length; info.kb = Math.round(text.length / 1024); }
+        catch (e) { info.ok = false; info.fehler = e.code || e.message; }
+        info.ms = Date.now() - t0;
+      }
+      return { statusCode: 200, headers: Object.assign({}, headers, { 'Cache-Control': 'no-store' }), body: JSON.stringify(info) };
+    }
     if (!sheetUrl) {
       return { statusCode: 500, headers,
         body: JSON.stringify({ error: 'GOOGLE_SHEET_URL environment variable not set' }) };
@@ -144,9 +196,15 @@ exports.handler = async function(event, context) {
 
   } catch (error) {
     console.error('Function error:', error.message);
+    /* Google hakt: lieber den letzten guten Stand zeigen als gar nichts */
+    const k = Object.keys(cacheStore).find(x => x === ((event.queryStringParameters || {}).filter === 'teams' ? 'teams' : 'all')) || Object.keys(cacheStore)[0];
+    if (k && cacheStore[k]) {
+      const alt = Object.assign({}, cacheStore[k].data, { stale: true, staleSeit: new Date(cacheStore[k].ts).toISOString(), staleGrund: error.code || error.message });
+      return { statusCode: 200, headers: Object.assign({}, headers, { 'Cache-Control': 'no-store' }), body: JSON.stringify(alt) };
+    }
     return {
-      statusCode: 500, headers,
-      body: JSON.stringify({ error: 'Failed to fetch pro scrim data', message: error.message })
+      statusCode: 502, headers,
+      body: JSON.stringify({ error: 'Failed to fetch pro scrim data', code: error.code || 'unknown', message: error.message })
     };
   }
 };
