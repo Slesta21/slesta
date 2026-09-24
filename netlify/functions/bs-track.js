@@ -316,7 +316,8 @@ exports.handler = async (event) => {
       const battles = (log.items || []).map(it => spiel(it, tag)).filter(Boolean);
       return aus(200, { speicher: false, peek: true, player: spielerZeile(p), battles, daily: [], ranked: rankedAus(p), rankedVerlauf: [] });
     }
-    const alt = !row || !row.last_fetch || (Date.now() - Date.parse(row.last_fetch)) > 150e3;
+    /* live=1: der offene Ranked-Tab fragt etwa jede Minute nach – dann schon nach 50 s neu holen */
+    const alt = !row || !row.last_fetch || (Date.now() - Date.parse(row.last_fetch)) > (q.live === '1' ? 50e3 : 150e3);
     let player = null, ranked = null;
     if (!row || q.sync === '1' && alt) {
       /* erst prüfen, ob es den Spieler gibt – ungültige IDs werden nie gespeichert */
