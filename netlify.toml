@@ -25,3 +25,7 @@
   to = "/.netlify/functions/bs-profil?tag=:splat"
   status = 200
   force = true
+
+# v138: Pro-Sheet alle 5 Minuten mit 30 s Zeit holen und in Supabase ablegen – fetch-pro-sheet liest die Kopie
+[functions."pro-sheet-sync"]
+  schedule = "*/5 * * * *"

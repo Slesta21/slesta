@@ -1,5 +1,5 @@
 /**
- * Netlify Function: fetch-pro-sheet (v4)
+ * Netlify Function: fetch-pro-sheet (v5, Build 138: liest die Supabase-Kopie von pro-sheet-sync)
  * Now includes player names in match data so the detail modal can show
  * who played which brawler.
  */
@@ -50,25 +50,57 @@ async function holeEinmal(url, ms) {
     throw e.code ? e : sheetFehler('sheet-network', e.message);
   } finally { clearTimeout(timer); }
 }
+/* Kopie in Supabase Storage – pro-sheet-sync legt sie alle 5 Minuten ab */
+const SB_URL = (process.env.SUPABASE_URL || 'https://ddtnhnwdszeddegctlag.supabase.co').replace(/\/$/, '');
+const SB_KEY = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_KEY || '').trim();
+function sbKopf() { return Object.assign({ apikey: SB_KEY }, /^eyJ/.test(SB_KEY) ? { Authorization: 'Bearer ' + SB_KEY } : {}); }
+async function ausSpeicher(name, ms) {
+  if (!SB_KEY) return null;
+  const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch(SB_URL + '/storage/v1/object/pro-sheet/' + name, { headers: sbKopf(), signal: ctrl.signal });
+    if (!r.ok) return null;
+    const text = await r.text();
+    const lm = Date.parse(r.headers.get('last-modified') || '');
+    return { text, alter: isNaN(lm) ? null : Date.now() - lm };
+  } catch (e) { return null; } finally { clearTimeout(timer); }
+}
+let csvQuelle = null;
+async function vonGoogle(sheetUrl, budget) {
+  const urls = csvUrls(sheetUrl), start = Date.now();
+  let letzterFehler = null;
+  for (const url of urls) {
+    const rest = budget - (Date.now() - start);
+    if (rest < 1500) break;
+    try { return await holeEinmal(url, rest); } catch (e) { letzterFehler = e; }
+  }
+  throw letzterFehler || sheetFehler('sheet-timeout');
+}
 async function fetchCSV(sheetUrl, force) {
   const now = Date.now();
   if (!force && csvCache && (now - csvCacheTs) < CSV_TTL) return csvCache;
   if (!force && csvFetching) return csvFetching;
   csvFetching = (async () => {
     try {
-      const urls = csvUrls(sheetUrl), start = Date.now();
-      let letzterFehler = null;
-      for (const url of urls) {
-        const rest = 7500 - (Date.now() - start);
-        if (rest < 1500) break;
-        try {
-          const text = await holeEinmal(url, rest);
-          csvCache = text;
-          csvCacheTs = Date.now();
-          return text;
-        } catch (e) { letzterFehler = e; }
+      const kopie = await ausSpeicher('latest.csv', 4000);
+      /* frische Kopie (unter 8 Min.) reicht – Google nicht abwarten */
+      if (!force && kopie && kopie.alter != null && kopie.alter < 8 * 60e3) {
+        csvCache = kopie.text; csvCacheTs = Date.now(); csvQuelle = { von: 'speicher', alterSek: Math.round(kopie.alter / 1000) };
+        return kopie.text;
       }
-      throw letzterFehler || sheetFehler('sheet-timeout');
+      try {
+        const text = await vonGoogle(sheetUrl, kopie ? 5000 : 7500);
+        csvCache = text; csvCacheTs = Date.now(); csvQuelle = { von: 'google' };
+        return text;
+      } catch (e) {
+        if (kopie) {
+          csvCache = kopie.text; csvCacheTs = Date.now();
+          csvQuelle = { von: 'speicher-alt', alterSek: kopie.alter != null ? Math.round(kopie.alter / 1000) : null, googleFehler: e.code || e.message };
+          return kopie.text;
+        }
+        if (csvCache) { csvQuelle = { von: 'ram-alt', googleFehler: e.code || e.message }; return csvCache; }
+        throw e;
+      }
     } finally {
       csvFetching = null;
     }
@@ -154,13 +186,26 @@ exports.handler = async function(event, context) {
     const sheetUrl = process.env.GOOGLE_SHEET_URL;
     /* ?diag=1 zeigt, woran es hängt – ohne die Sheet-Adresse preiszugeben */
     if (params.diag === '1') {
-      const info = { gesetzt: !!sheetUrl, varianten: sheetUrl ? csvUrls(sheetUrl).length : 0, cacheAlterSek: csvCacheTs ? Math.round((Date.now() - csvCacheTs) / 1000) : null };
+      const info = { build: 138, sheetUrlGesetzt: !!sheetUrl, supabaseKeyGesetzt: !!SB_KEY, varianten: sheetUrl ? csvUrls(sheetUrl).length : 0 };
+      const t0 = Date.now();
+      const [st, kopie] = await Promise.all([ausSpeicher('status.json', 3000), ausSpeicher('latest.csv', 4000)]);
+      try { info.letzterSync = st ? JSON.parse(st.text) : null; } catch (e) { info.letzterSync = null; }
+      info.kopie = kopie ? { kb: Math.round(kopie.text.length / 1024), alterMin: kopie.alter != null ? Math.round(kopie.alter / 6e4) : null } : null;
       if (sheetUrl) {
-        const t0 = Date.now();
-        try { const text = await fetchCSV(sheetUrl, true); info.ok = true; info.zeilen = text.split('\n').length; info.kb = Math.round(text.length / 1024); }
-        catch (e) { info.ok = false; info.fehler = e.code || e.message; }
-        info.ms = Date.now() - t0;
+        const t1 = Date.now();
+        try { const text = await vonGoogle(sheetUrl, 7000); info.google = { ok: true, kb: Math.round(text.length / 1024), ms: Date.now() - t1 }; }
+        catch (e) { info.google = { ok: false, fehler: e.code || e.message, ms: Date.now() - t1 }; }
       }
+      const quelle = (info.google && info.google.ok) || kopie;
+      if (quelle) {
+        try {
+          const t2 = Date.now();
+          const text = kopie && (!info.google || !info.google.ok) ? kopie.text : await fetchCSV(sheetUrl, false);
+          const res = parseAndAggregate(text, 'all', null, null, null, null, null, 0, false);
+          info.auswertung = { ok: true, partien: res.totalParsed, zurueck: res.matches.length, mb: Math.round((res.returnedBytes || 0) / 104857.6) / 10, ms: Date.now() - t2 };
+        } catch (e) { info.auswertung = { ok: false, fehler: e.message }; }
+      }
+      info.msGesamt = Date.now() - t0;
       return { statusCode: 200, headers: Object.assign({}, headers, { 'Cache-Control': 'no-store' }), body: JSON.stringify(info) };
     }
     if (!sheetUrl) {
@@ -188,7 +233,8 @@ exports.handler = async function(event, context) {
       fnVersion: result.fnVersion || null,
       truncated: !!result.truncated,
       statsForNewest: (result.statsForNewest === undefined ? null : result.statsForNewest),
-      returnedBytes: result.returnedBytes || null
+      returnedBytes: result.returnedBytes || null,
+      quelle: csvQuelle
     };
     cacheStore[cacheKey] = { data: data, ts: now };
 
