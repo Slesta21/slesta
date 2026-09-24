@@ -37,6 +37,7 @@ exports.handler = async (event) => {
       name: p.name || '',
       trophies: p.trophies || 0,
       icon: p.icon && p.icon.id || null,
+      ranked: p.rankedElo != null ? { elo: p.rankedElo, rank: p.rankedRank != null ? p.rankedRank : null } : null,
       brawlers: (p.brawlers || []).map(b => ({
         name: b.name,
         power: b.power || 0,
