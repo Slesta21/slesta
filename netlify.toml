@@ -1,0 +1,27 @@
+[build]
+  publish = "."
+  functions = "netlify/functions"
+[build.environment]
+  NODE_VERSION = "18"
+
+# v107: erlaubt der Vorlesestimme mehrere CPU-Kerne (2–4× schneller)
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Cross-Origin-Opener-Policy = "same-origin"
+    Cross-Origin-Embedder-Policy = "credentialless"
+
+# v110: Account-Tracking – holt alle 30 Minuten neue Matches
+[functions."bs-cron"]
+  schedule = "*/30 * * * *"
+
+# v117: Community-Meta – Battlelogs von Top-Spielern für Tagesplan & Upgrade-Planer
+[functions."bs-sample"]
+  schedule = "*/30 * * * *"
+
+# v118: öffentlicher Profil-Link  /p/TAG  → Seite mit Vorschaubild, leitet zum Profil weiter
+[[redirects]]
+  from = "/p/*"
+  to = "/.netlify/functions/bs-profil?tag=:splat"
+  status = 200
+  force = true
