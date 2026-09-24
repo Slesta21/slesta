@@ -155,11 +155,11 @@ async function andereElo(zeilen) {
   let w = 0, l = 0;
   set.forEach(z => { if (z.result === 'victory') w++; else if (z.result === 'defeat') l++; });
   const fertig = w >= 2 || l >= 2, ende = Date.parse(set[0].bt), start = Date.parse(set[set.length - 1].bt) - 5 * 6e4;
-  if (fertig && Date.now() - ende > 20 * 6e4) return;
+  if (fertig && (Date.now() - ende > 20 * 6e4 || Date.now() - ende < 90e3)) return; /* nach dem Set 90 s warten, bis die neue Elo im Profil steht */
   const tags = [...new Set([].concat(...set.map(z => (z.team || []).concat(z.opp || []).map(p => normTag(p.t)))))].filter(t => TAG_OK.test(t));
   if (!tags.length) return;
   let da;
-  try { da = await sb('bs_ranked?tag=in.(' + tags.join(',') + ')&t=gte.' + encodeURIComponent(new Date(fertig ? ende : start).toISOString()) + '&select=tag'); }
+  try { da = await sb('bs_ranked?tag=in.(' + tags.join(',') + ')&t=gte.' + encodeURIComponent(new Date(fertig ? ende + 90e3 : start).toISOString()) + '&select=tag'); }
   catch (e) { rankedFehler(e); return; }
   const hat = new Set((da || []).map(r => r.tag));
   await Promise.all(tags.filter(t => !hat.has(t)).slice(0, 5).map(async t => {
@@ -182,7 +182,8 @@ async function syncTag(tag, mitProfil, vorab) {
   /* Profil (für die Elo) auch dann holen, wenn seit dem letzten Elo-Stand Ranked gespielt wurde */
   const rkZeit = zeilen.filter(z => z.typ === 'soloRanked').reduce((m, z) => z.bt > m ? z.bt : m, '');
   const letzter = rkZeit || mitProfil ? await rankedLetzter(tag) : null;
-  const rkNeu = !!rkZeit && RANKED_OK && (!letzter || Date.parse(rkZeit) > Date.parse(letzter.t));
+  /* so lange nachmessen, bis ein Stand mind. 90 s nach der letzten Ranked-Runde da ist (Brawl Stars aktualisiert die Elo mit Verzögerung) */
+  const rkNeu = !!rkZeit && RANKED_OK && (!letzter || Date.parse(letzter.t) < Date.parse(rkZeit) + 90e3);
   if (mitProfil) {
     profil = vorab || await bs('/players/%23' + tag);
     const z = spielerZeile(profil, upd);
