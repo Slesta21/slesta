@@ -88,7 +88,7 @@ async function fetchCSV(sheetUrl, force) {
     try {
       const kopie = await csvKopie(6000);
       /* frische Kopie (unter 8 Min.) reicht – Google nicht abwarten */
-      if (!force && kopie && kopie.alter != null && kopie.alter < 8 * 60e3) {
+      if (!force && kopie && kopie.alter != null && kopie.alter < 6 * 36e5) {
         csvCache = kopie.text; csvCacheTs = Date.now(); csvQuelle = { von: 'speicher', alterSek: Math.round(kopie.alter / 1000) };
         return kopie.text;
       }

@@ -19,6 +19,7 @@ function sbKopf(extra) {
 /* Auswertung und Sheet-Abruf kommen aus fetch-pro-sheet.js – so rechnen beide gleich */
 const PS = require('./fetch-pro-sheet.js');
 const zlib = require('zlib');
+const crypto = require('crypto');
 
 /* Stichtag der Seite (SD_CUTOFF in index.html) – danach fragt die Seite standardmäßig */
 async function stichtag() {
@@ -55,7 +56,10 @@ async function hochladen(name, body, typ, oeff) {
 exports.handler = async function () {
   const sheetUrl = process.env.GOOGLE_SHEET_URL;
   const t0 = Date.now();
-  const status = { t: new Date().toISOString(), build: 142, ok: false, schritt: 'start' };
+  const status = { t: new Date().toISOString(), build: 148, ok: false, schritt: 'start' };
+  /* letzter Stand – unverändertes Sheet wird nicht neu ausgewertet (spart Netlify-Rechenzeit) */
+  let vorher = null;
+  try { const r = await fetch(SB_URL + '/storage/v1/object/public/' + BUCKET_OEFF + '/status.json?t=' + Date.now()); if (r.ok) vorher = JSON.parse(await r.text()); } catch (e) {}
   /* Zwischenstand öffentlich ablegen – die Seite zeigt ihn im Fehler-Banner an.
      Bricht der Job mittendrin ab (Zeitlimit), sieht man so, wo. */
   const melde = async (schritt) => {
@@ -76,6 +80,14 @@ exports.handler = async function () {
     })(), stichtag()]);
     if (text) {
       delete status.fehler;
+      status.hash = crypto.createHash('sha1').update(text).digest('hex');
+      const alterVoll = vorher && vorher.tVoll ? Date.now() - Date.parse(vorher.tVoll) : Infinity;
+      if (vorher && vorher.ok && vorher.hash === status.hash && vorher.seit === seit && alterVoll < 5 * 36e5) {
+        Object.assign(status, { ok: true, kb: Math.round(text.length / 1024), seit, tVoll: vorher.tVoll, vorgerechnet: vorher.vorgerechnet, unveraendert: true });
+        await melde('unveraendert');
+        return { statusCode: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(status) };
+      }
+      status.tVoll = new Date().toISOString();
       status.kb = Math.round(text.length / 1024); status.msSheet = Date.now() - t0; status.seit = seit;
       await melde('auswerten');
       /* Standard-Antworten vorrechnen: wichtigste zuerst, solange Zeit ist */

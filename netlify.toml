@@ -13,11 +13,11 @@
 
 # v110: Account-Tracking – läuft alle 10 Minuten: aktive Spieler jedes Mal, alle anderen alle 30 Minuten
 [functions."bs-cron"]
-  schedule = "*/10 * * * *"
+  schedule = "*/15 * * * *"
 
 # v117: Community-Meta – Battlelogs von Top-Spielern für Tagesplan & Upgrade-Planer
 [functions."bs-sample"]
-  schedule = "*/30 * * * *"
+  schedule = "0 * * * *"
 
 # v118: öffentlicher Profil-Link  /p/TAG  → Seite mit Vorschaubild, leitet zum Profil weiter
 [[redirects]]
@@ -28,4 +28,10 @@
 
 # v138: Pro-Sheet alle 5 Minuten mit 30 s Zeit holen und in Supabase ablegen – fetch-pro-sheet liest die Kopie
 [functions."pro-sheet-sync"]
-  schedule = "*/5 * * * *"
+  schedule = "*/30 * * * *"
+
+# v148: Bilder & Lobby-Videos länger im Browser behalten – spart Netlify-Bandbreite und Anfragen
+[[headers]]
+  for = "/img/*"
+  [headers.values]
+    Cache-Control = "public, max-age=604800, stale-while-revalidate=86400"
