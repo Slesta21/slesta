@@ -52,6 +52,9 @@ function spiel(it, tag) {
   }
   if (!me) return null;
   const br = me.brawler || (me.brawlers && me.brawlers[0]) || {};
+  /* Star-Spieler der Runde in den Team-/Gegner-Daten markieren (s: 1) */
+  const starTag = b.starPlayer ? String(b.starPlayer.tag || '').toUpperCase().replace('#', '') : '';
+  const mk = p => { const m = mini(p); if (starTag && m.t.toUpperCase() === starTag) m.s = 1; return m; };
   return {
     tag, bt,
     mode: b.mode || ev.mode || 'unknown',
@@ -66,8 +69,8 @@ function spiel(it, tag) {
     tchange: b.trophyChange != null ? b.trophyChange : null,
     dur: b.duration || null,
     star: !!(b.starPlayer && ich(b.starPlayer)),
-    team: team.map(mini),
-    opp: opp.map(mini)
+    team: team.map(mk),
+    opp: opp.map(mk)
   };
 }
 function brawlerListe(p) {
