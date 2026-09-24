@@ -111,6 +111,32 @@ async function battlesLesen(tag, off) {
   return sb(url(basis));
 }
 
+/* Ranked-Elo steht nicht im Battlelog (dort nur die Rang-Stufe 1–22), sondern im Profil.
+   Jeder neue Stand landet in bs_ranked. Solange die Tabelle fehlt, ohne sie arbeiten. */
+let RANKED_OK = true;
+function rankedAus(p) {
+  if (!p || p.rankedElo == null) return null;
+  const n = v => v != null ? v : null;
+  return { elo: p.rankedElo, rank: n(p.rankedRank), season: n(p.rankedSeasonId), s_elo: n(p.highestSeasonRankedElo), s_rank: n(p.highestSeasonRankedRank), a_elo: n(p.highestAllTimeRankedElo), a_rank: n(p.highestAllTimeRankedRank) };
+}
+function rankedFehler(e) { if (/bs_ranked/.test(e.message)) RANKED_OK = false; }
+async function rankedLetzter(tag) {
+  if (!RANKED_OK) return null;
+  try { const r = await sb('bs_ranked?tag=eq.' + tag + '&select=t,elo,rank&order=t.desc&limit=1'); return (r && r[0]) || null; }
+  catch (e) { rankedFehler(e); return null; }
+}
+async function rankedSpeichern(tag, p, letzter) {
+  const r = rankedAus(p);
+  if (!r || !RANKED_OK || (letzter && letzter.elo === r.elo && letzter.rank === r.rank)) return;
+  try { await sb('bs_ranked', { method: 'POST', body: [Object.assign({ tag, t: new Date().toISOString() }, r)], headers: { Prefer: 'return=minimal' } }); }
+  catch (e) { rankedFehler(e); }
+}
+async function rankedVerlauf(tag) {
+  if (!RANKED_OK) return [];
+  try { return (await sb('bs_ranked?tag=eq.' + tag + '&select=t,elo,rank,season,s_elo,s_rank,a_elo,a_rank&order=t.asc&limit=3000')) || []; }
+  catch (e) { rankedFehler(e); return []; }
+}
+
 /* Holt Profil + Battlelog und speichert alles. Gibt das Profil zurück. */
 async function syncTag(tag, mitProfil, vorab) {
   const log = await bs('/players/%23' + tag + '/battlelog');
@@ -119,6 +145,10 @@ async function syncTag(tag, mitProfil, vorab) {
   await Promise.all([zeilen.length ? battlesSpeichern(zeilen) : null, metaSpeichern(meta).catch(() => 0)]);
   let profil = null;
   const upd = { last_fetch: new Date().toISOString(), fails: 0 };
+  /* Profil (für die Elo) auch dann holen, wenn seit dem letzten Elo-Stand Ranked gespielt wurde */
+  const rkZeit = zeilen.filter(z => z.typ === 'soloRanked').reduce((m, z) => z.bt > m ? z.bt : m, '');
+  const letzter = rkZeit || mitProfil ? await rankedLetzter(tag) : null;
+  const rkNeu = !!rkZeit && RANKED_OK && (!letzter || Date.parse(rkZeit) > Date.parse(letzter.t));
   if (mitProfil) {
     profil = vorab || await bs('/players/%23' + tag);
     const z = spielerZeile(profil, upd);
@@ -126,8 +156,10 @@ async function syncTag(tag, mitProfil, vorab) {
     await sb('bs_players?on_conflict=tag', { method: 'POST', body: [z], headers: { Prefer: 'resolution=merge-duplicates,return=minimal' } });
     await sb('bs_daily?on_conflict=tag,day', { method: 'POST', body: [{ tag, day: z.daily_day, trophies: z.trophies, br: z.brawlers.map(b => [b.name, b.power, b.trophies]) }], headers: { Prefer: 'resolution=merge-duplicates,return=minimal' } });
   } else {
+    if (rkNeu) { try { profil = await bs('/players/%23' + tag); } catch (e) { } }
     await sb('bs_players?tag=eq.' + tag, { method: 'PATCH', body: upd, headers: { Prefer: 'return=minimal' } });
   }
+  if (profil) await rankedSpeichern(tag, profil, rkNeu ? null : letzter);
   return { profil, neu: zeilen.length };
 }
 
