@@ -251,7 +251,7 @@ async function metaAufraeumen() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// bs-cron · läuft automatisch alle 30 Minuten (Zeitplan in netlify.toml)
+// bs-cron · läuft automatisch alle 10 Minuten (Zeitplan in netlify.toml)
 // Holt für alle getrackten Accounts neue Matches. Einmal am Tag zusätzlich
 // das Profil (Pokale, Brawler, Power) für den Tagesverlauf – und immer dann,
 // wenn neue Ranked-Matches dazugekommen sind (für den Elo-Verlauf in bs_ranked).
@@ -261,7 +261,15 @@ exports.handler = async () => {
   if (!BS_KEY || !SB_KEY) return { statusCode: 200, body: 'not configured' };
   const start = Date.now();
   const grenze = new Date(Date.now() - 30 * 864e5).toISOString();
-  const liste = await sb('bs_players?select=tag,daily_day,fails&last_seen=gte.' + grenze + '&order=last_fetch.asc.nullsfirst&limit=60');
+  /* Wer die Seite in den letzten 3 Stunden offen hatte, spielt vermutlich gerade: bei jedem Lauf (alle 10 Min.) holen.
+     Alle anderen wie bisher höchstens alle 30 Minuten. */
+  const aktivAb = new Date(Date.now() - 3 * 36e5).toISOString(), faelligAb = new Date(Date.now() - 28 * 6e4).toISOString();
+  const [aktive, faellige] = await Promise.all([
+    sb('bs_players?select=tag,daily_day,fails&last_seen=gte.' + aktivAb + '&order=last_fetch.asc.nullsfirst&limit=30'),
+    sb('bs_players?select=tag,daily_day,fails&last_seen=gte.' + grenze + '&or=(last_fetch.is.null,last_fetch.lt.' + faelligAb + ')&order=last_fetch.asc.nullsfirst&limit=60')
+  ]);
+  const gesehen = {}, liste = [];
+  (aktive || []).concat(faellige || []).forEach(p => { if (!gesehen[p.tag]) { gesehen[p.tag] = 1; liste.push(p); } });
   const tag = heute();
   let ok = 0, fehler = 0, i = 0;
   async function arbeiter() {
