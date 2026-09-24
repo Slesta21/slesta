@@ -93,7 +93,7 @@ async function fetchCSV(sheetUrl, force) {
         return kopie.text;
       }
       try {
-        const text = await vonGoogle(sheetUrl, kopie ? 5000 : 7500);
+        const text = await vonGoogle(sheetUrl, kopie ? 4500 : 6500);
         csvCache = text; csvCacheTs = Date.now(); csvQuelle = { von: 'google' };
         return text;
       } catch (e) {
@@ -238,9 +238,9 @@ exports.handler = async function(event, context) {
     const sheetUrl = process.env.GOOGLE_SHEET_URL;
     /* ?diag=1 zeigt, woran es hängt – ohne die Sheet-Adresse preiszugeben */
     if (params.diag === '1') {
-      const info = { build: 140, sheetUrlGesetzt: !!sheetUrl, supabaseKeyGesetzt: !!SB_KEY, varianten: sheetUrl ? csvUrls(sheetUrl).length : 0 };
+      const info = { build: 142, sheetUrlGesetzt: !!sheetUrl, supabaseKeyGesetzt: !!SB_KEY, varianten: sheetUrl ? csvUrls(sheetUrl).length : 0 };
       const t0 = Date.now();
-      const [st, kopie] = await Promise.all([ausSpeicher('status.json', 3000), csvKopie(6000)]);
+      const [st, kopie] = await Promise.all([ausSpeicher('status.json', 3000, false, 'pro-public'), csvKopie(6000)]);
       try { info.letzterSync = st ? JSON.parse(st.text) : null; } catch (e) { info.letzterSync = null; }
       info.kopie = kopie ? { kb: Math.round(kopie.text.length / 1024), alterMin: kopie.alter != null ? Math.round(kopie.alter / 6e4) : null } : null;
       if (sheetUrl) {
@@ -445,6 +445,11 @@ function parseAndAggregate(csvText, filter, teamScope, playerScope, modeScope, m
       const line = dataLines[i].trim();
       if (!line) continue;
 
+      /* Zeilen vor dem Stichtag gar nicht erst ganz zerlegen */
+      if (sinceNum && !statsOnly && C.date >= 0) {
+        const _df = feldSchnell(line, C.date);
+        if (_df !== null) { const _dn0 = _fnRowDate(_df.trim(), _sinceFmt); if (_dn0 && _dn0 < sinceNum) continue; }
+      }
       const cols = parseCSVLine(line);
       if (cols.length < MIN_COLS) continue;
       const at = function(ix){ return ix >= 0 ? safeStr(cols[ix]) : ''; };
@@ -495,6 +500,9 @@ function parseAndAggregate(csvText, filter, teamScope, playerScope, modeScope, m
         /* Hat kein Spieler Werte, faellt das Feld ganz weg. */
         return any ? out : null;
       };
+      /* je Zeile nur einmal rechnen – wurde vorher bis zu 8x pro Zeile gebaut */
+      const _psC = {};
+      const perSideC = function(side){ return (side in _psC) ? _psC[side] : (_psC[side] = perSide(side)); };
 
       const matchTag = at(C.id);
       const team1 = at(C.t1);
@@ -617,8 +625,8 @@ function parseAndAggregate(csvText, filter, teamScope, playerScope, modeScope, m
            Stelle 0 gehoert zu Brawler 0. Zahlen kommen als Zahl, Namen
            als Text — leere Felder werden null, nicht 0, damit sich
            "nichts gemessen" von "null Schaden" unterscheiden laesst. */
-        players1: perSide('t1'),
-        players2: perSide('t2'),
+        players1: perSideC('t1'),
+        players2: perSideC('t2'),
         firstPickBrawler: at(C.fpBrawler),
         team1FirstPick: at(C.t1fp),
         team2FirstPick: at(C.t2fp),
@@ -677,9 +685,9 @@ function parseAndAggregate(csvText, filter, teamScope, playerScope, modeScope, m
         };
 
         const team1Won = team1Result === 'Win';
-        team1Brawlers.forEach(function(b, i){ addStat(b, team1Won, (perSide('t1')||[])[i]); });
+        team1Brawlers.forEach(function(b, i){ addStat(b, team1Won, (perSideC('t1')||[])[i]); });
         const team2Won = team2Result === 'Win';
-        team2Brawlers.forEach(function(b, i){ addStat(b, team2Won, (perSide('t2')||[])[i]); });
+        team2Brawlers.forEach(function(b, i){ addStat(b, team2Won, (perSideC('t2')||[])[i]); });
 
         /* Bans zaehlen — bisher gab es dazu ueberhaupt keine Zahlen. */
         C.t1b_ban.map(at).concat(C.t2b_ban.map(at)).forEach(function(b){
@@ -843,7 +851,11 @@ function parseAndAggregate(csvText, filter, teamScope, playerScope, modeScope, m
      ohnehin fast nur bei den neuesten. So bleibt beides erhalten.
      Erst wenn das nicht reicht, wird an der Zahl gedreht. */
   const LIMIT = 5.2 * 1024 * 1024;
-  const size = function(){ return JSON.stringify({ matches: limitedMatches, ...extra }).length; };
+  /* Groesse je Partie einmal messen und nur Geaendertes neu – vorher wurde
+     die ganze Antwort bis zu 36-mal komplett serialisiert. */
+  const extraLen = JSON.stringify(extra).length + 16;
+  let lens = limitedMatches.map(function(m){ return JSON.stringify(m).length; });
+  const size = function(){ let t = extraLen + lens.length; for (let i = 0; i < lens.length; i++) t += lens[i]; return t; };
   let sz = size();
   if (sz > LIMIT && !statsOnly){
     /* Von hinten die Werte abwerfen, bis es passt. */
@@ -856,6 +868,7 @@ function parseAndAggregate(csvText, filter, teamScope, playerScope, modeScope, m
           limitedMatches[i] = Object.assign({}, limitedMatches[i]);
           delete limitedMatches[i].players1;
           delete limitedMatches[i].players2;
+          lens[i] = JSON.stringify(limitedMatches[i]).length;
         }
       }
       sz = size();
@@ -867,6 +880,7 @@ function parseAndAggregate(csvText, filter, teamScope, playerScope, modeScope, m
   while (sz > LIMIT && limitedMatches.length > 200 && guard2++ < 12){
     const factor = Math.max(0.55, (LIMIT / sz) * 0.95);
     limitedMatches = limitedMatches.slice(0, Math.floor(limitedMatches.length * factor));
+    lens = lens.slice(0, limitedMatches.length);
     sz = size();
   }
   let size2 = sz;
@@ -877,6 +891,22 @@ function parseAndAggregate(csvText, filter, teamScope, playerScope, modeScope, m
 function safeStr(val) {
   if (val === undefined || val === null) return '';
   return String(val).trim();
+}
+
+/* Feld Nummer ix ohne die ganze Zeile zu zerlegen; null, wenn davor Anfuehrungszeichen stehen */
+function feldSchnell(line, ix) {
+  let start = 0;
+  for (let k = 0; k < ix; k++) {
+    const c = line.indexOf(',', start);
+    if (c < 0) return null;
+    start = c + 1;
+  }
+  const q = line.indexOf('"');
+  if (q >= 0 && q <= start) return null;
+  let end = line.indexOf(',', start);
+  if (end < 0) end = line.length;
+  const f = line.slice(start, end);
+  return f.indexOf('"') >= 0 ? null : f;
 }
 
 function parseCSVLine(line) {
@@ -908,8 +938,9 @@ function _fnDetectFmt(dataLines, dateIx){
   var firstHigh=0, secondHigh=0;
   for(var i=0;i<dataLines.length;i++){
     var line=(dataLines[i]||'').trim(); if(!line) continue;
-    var cols=parseCSVLine(line); if(cols.length<=ix) continue;
-    var d=safeStr(cols[ix]); if(!d) continue;
+    var d=feldSchnell(line, ix);
+    if(d===null){ var cols=parseCSVLine(line); if(cols.length<=ix) continue; d=cols[ix]; }
+    d=safeStr(d); if(!d) continue;
     var m=String(d).match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/); if(!m) continue;
     if(parseInt(m[1],10)>12) firstHigh++;
     if(parseInt(m[2],10)>12) secondHigh++;

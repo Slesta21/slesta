@@ -1,5 +1,5 @@
 /**
- * Netlify Function: pro-sheet-sync (Build 140, geplant alle 5 Minuten)
+ * Netlify Function: pro-sheet-sync (Build 142, geplant alle 5 Minuten)
  * Holt das Pro-Sheet mit viel Zeit (geplante Funktionen dürfen 30 s laufen)
  * und legt die CSV in Supabase Storage ab. fetch-pro-sheet liest dann von
  * dort – so hängt die Seite nicht mehr daran, ob Google gerade in unter
@@ -54,11 +54,18 @@ async function hochladen(name, body, typ, oeff) {
 
 exports.handler = async function () {
   const sheetUrl = process.env.GOOGLE_SHEET_URL;
-  const status = { t: new Date().toISOString(), ok: false };
   const t0 = Date.now();
+  const status = { t: new Date().toISOString(), build: 142, ok: false, schritt: 'start' };
+  /* Zwischenstand öffentlich ablegen – die Seite zeigt ihn im Fehler-Banner an.
+     Bricht der Job mittendrin ab (Zeitlimit), sieht man so, wo. */
+  const melde = async (schritt) => {
+    status.schritt = schritt; status.ms = Date.now() - t0;
+    try { await hochladen('status.json', JSON.stringify(status), 'application/json', true); } catch (e) { status.statusFehler = e.message; }
+  };
   if (!sheetUrl) status.fehler = 'GOOGLE_SHEET_URL fehlt';
   else if (!SB_KEY) status.fehler = 'SUPABASE_SERVICE_ROLE_KEY fehlt';
   else {
+    await melde('sheet-laden');
     const [text, seit] = await Promise.all([(async () => {
       for (const url of PS.csvUrls(sheetUrl)) {
         const rest = 15000 - (Date.now() - t0);
@@ -69,23 +76,27 @@ exports.handler = async function () {
     })(), stichtag()]);
     if (text) {
       delete status.fehler;
-      status.ok = true; status.kb = Math.round(text.length / 1024); status.msSheet = Date.now() - t0; status.seit = seit;
-      try { await hochladen('latest.csv.gz', zlib.gzipSync(text, { level: 5 }), 'application/gzip'); } catch (e) { status.csvFehler = e.message; }
+      status.kb = Math.round(text.length / 1024); status.msSheet = Date.now() - t0; status.seit = seit;
+      await melde('auswerten');
       /* Standard-Antworten vorrechnen: wichtigste zuerst, solange Zeit ist */
       status.vorgerechnet = [];
       for (const [filter, s] of [['all', seit], ['teams', seit], ['all', 0]]) {
-        if (Date.now() - t0 > 20000) break;
+        if (status.vorgerechnet.length && Date.now() - t0 > 18000) break;
         try {
           const data = PS.baueDaten(text, filter, null, null, null, null, null, s, false);
           data.quelle = { von: 'vorgerechnet' };
           await hochladen(PS.vorName(filter, s), zlib.gzipSync(JSON.stringify(data), { level: 6 }), 'application/gzip', true);
           status.vorgerechnet.push(filter + '-' + s);
+          status.ok = true;
+          await melde('vorgerechnet-' + filter + '-' + s);
         } catch (e) { status.vorFehler = e.message; }
+      }
+      if (Date.now() - t0 < 24000) {
+        try { await hochladen('latest.csv.gz', zlib.gzipSync(text, { level: 5 }), 'application/gzip'); } catch (e) { status.csvFehler = e.message; }
       }
     }
   }
-  status.ms = Date.now() - t0;
-  try { await hochladen('status.json', JSON.stringify(status), 'application/json'); } catch (e) { status.statusFehler = e.message; }
+  await melde(status.ok ? 'fertig' : 'fehler');
   console.log('pro-sheet-sync', JSON.stringify(status));
   return { statusCode: 200, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }, body: JSON.stringify(status) };
 };
