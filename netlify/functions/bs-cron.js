@@ -320,7 +320,7 @@ exports.handler = async () => {
   const heiss = await heissLesen(), heissTags = Object.keys(heiss).filter(t => heiss[t] > jetzt && TAG_OK.test(t));
   const [hRows, faellig, alt] = await Promise.all([
     heissTags.length ? sb('bs_players?select=tag,daily_day,fails&tag=in.(' + heissTags.join(',') + ')') : [],
-    sb('bs_players?select=tag,daily_day,fails&last_seen=gte.' + grenze + '&or=(last_fetch.is.null,last_fetch.lt.' + iso(jetzt - 13 * 6e4) + ')&order=last_fetch.asc.nullsfirst&limit=60'),
+    sb('bs_players?select=tag,daily_day,fails&last_seen=gte.' + grenze + '&or=(last_fetch.is.null,last_fetch.lt.' + iso(jetzt - 25 * 6e4) + ')&order=last_fetch.asc.nullsfirst&limit=60'),
     sb('bs_players?select=tag,daily_day,fails&or=(last_seen.is.null,last_seen.lt.' + grenze + ')&last_fetch=lt.' + iso(jetzt - 115 * 6e4) + '&order=last_fetch.asc.nullsfirst&limit=15')
   ]);
   const gesehen = {}, liste = [];
@@ -329,7 +329,7 @@ exports.handler = async () => {
   heissTags.forEach(t => { neuHeiss[t] = heiss[t]; });
   let ok = 0, fehler = 0, i = 0;
   async function arbeiter() {
-    while (i < liste.length && Date.now() - start < 21000) {
+    while (i < liste.length && Date.now() - start < 15000) {
       const p = liste[i++];
       try {
         const r = await syncTag(p.tag, p.daily_day !== tag);

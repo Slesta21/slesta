@@ -82,7 +82,7 @@ exports.handler = async function () {
       delete status.fehler;
       status.hash = crypto.createHash('sha1').update(text).digest('hex');
       const alterVoll = vorher && vorher.tVoll ? Date.now() - Date.parse(vorher.tVoll) : Infinity;
-      if (vorher && vorher.ok && vorher.hash === status.hash && vorher.seit === seit && alterVoll < 5 * 36e5) {
+      if (vorher && vorher.ok && vorher.hash === status.hash && vorher.seit === seit && alterVoll < 11 * 36e5) {
         Object.assign(status, { ok: true, kb: Math.round(text.length / 1024), seit, tVoll: vorher.tVoll, vorgerechnet: vorher.vorgerechnet, unveraendert: true });
         await melde('unveraendert');
         return { statusCode: 200, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(status) };

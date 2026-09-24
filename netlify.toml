@@ -11,13 +11,13 @@
     Cross-Origin-Opener-Policy = "same-origin"
     Cross-Origin-Embedder-Policy = "credentialless"
 
-# v149: Account-Tracking – alle 5 Min.: wer gerade Ranked spielt jedes Mal, alle anderen ca. alle 15 Min., lange Inaktive alle 2 Std.
+# v154: Account-Tracking – alle 30 Min. (Netlify-Gratisplan: Rechenzeit kostet Credits)
 [functions."bs-cron"]
-  schedule = "*/5 * * * *"
+  schedule = "*/30 * * * *"
 
 # v117: Community-Meta – Battlelogs von Top-Spielern für Tagesplan & Upgrade-Planer
 [functions."bs-sample"]
-  schedule = "0 * * * *"
+  schedule = "0 */6 * * *"
 
 # v118: öffentlicher Profil-Link  /p/TAG  → Seite mit Vorschaubild, leitet zum Profil weiter
 [[redirects]]
@@ -28,7 +28,7 @@
 
 # v138: Pro-Sheet alle 5 Minuten mit 30 s Zeit holen und in Supabase ablegen – fetch-pro-sheet liest die Kopie
 [functions."pro-sheet-sync"]
-  schedule = "*/30 * * * *"
+  schedule = "0 */3 * * *"
 
 # v148: Bilder & Lobby-Videos länger im Browser behalten – spart Netlify-Bandbreite und Anfragen
 [[headers]]
