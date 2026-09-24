@@ -1,5 +1,5 @@
 /**
- * Netlify Function: pro-sheet-sync (Build 139, geplant alle 5 Minuten)
+ * Netlify Function: pro-sheet-sync (Build 140, geplant alle 5 Minuten)
  * Holt das Pro-Sheet mit viel Zeit (geplante Funktionen dürfen 30 s laufen)
  * und legt die CSV in Supabase Storage ab. fetch-pro-sheet liest dann von
  * dort – so hängt die Seite nicht mehr daran, ob Google gerade in unter
@@ -9,6 +9,8 @@
 const SB_URL = (process.env.SUPABASE_URL || 'https://ddtnhnwdszeddegctlag.supabase.co').replace(/\/$/, '');
 const SB_KEY = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_KEY || '').trim();
 const BUCKET = 'pro-sheet';
+/* öffentlicher Bucket nur für die fertigen Antworten – die Seite lädt sie direkt, falls die Netlify-Funktion hakt */
+const BUCKET_OEFF = 'pro-public';
 
 function sbKopf(extra) {
   return Object.assign({ apikey: SB_KEY }, /^eyJ/.test(SB_KEY) ? { Authorization: 'Bearer ' + SB_KEY } : {}, extra || {});
@@ -30,8 +32,9 @@ async function stichtag() {
   return 20260916;
 }
 
-async function hochladen(name, body, typ) {
-  const put = () => fetch(SB_URL + '/storage/v1/object/' + BUCKET + '/' + name, {
+async function hochladen(name, body, typ, oeff) {
+  const bucket = oeff ? BUCKET_OEFF : BUCKET;
+  const put = () => fetch(SB_URL + '/storage/v1/object/' + bucket + '/' + name, {
     method: 'POST', headers: sbKopf({ 'Content-Type': typ, 'x-upsert': 'true', 'Cache-Control': 'no-cache' }), body
   });
   let r = await put();
@@ -41,7 +44,7 @@ async function hochladen(name, body, typ) {
     if (/bucket/i.test(txt) || r.status === 404) {
       await fetch(SB_URL + '/storage/v1/bucket', {
         method: 'POST', headers: sbKopf({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ id: BUCKET, name: BUCKET, public: false })
+        body: JSON.stringify({ id: bucket, name: bucket, public: !!oeff })
       }).catch(() => 0);
       r = await put();
     }
@@ -75,7 +78,7 @@ exports.handler = async function () {
         try {
           const data = PS.baueDaten(text, filter, null, null, null, null, null, s, false);
           data.quelle = { von: 'vorgerechnet' };
-          await hochladen(PS.vorName(filter, s), zlib.gzipSync(JSON.stringify(data), { level: 6 }), 'application/gzip');
+          await hochladen(PS.vorName(filter, s), zlib.gzipSync(JSON.stringify(data), { level: 6 }), 'application/gzip', true);
           status.vorgerechnet.push(filter + '-' + s);
         } catch (e) { status.vorFehler = e.message; }
       }

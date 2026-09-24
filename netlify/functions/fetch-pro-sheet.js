@@ -55,11 +55,11 @@ async function holeEinmal(url, ms) {
 const SB_URL = (process.env.SUPABASE_URL || 'https://ddtnhnwdszeddegctlag.supabase.co').replace(/\/$/, '');
 const SB_KEY = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_KEY || '').trim();
 function sbKopf() { return Object.assign({ apikey: SB_KEY }, /^eyJ/.test(SB_KEY) ? { Authorization: 'Bearer ' + SB_KEY } : {}); }
-async function ausSpeicher(name, ms, roh) {
+async function ausSpeicher(name, ms, roh, bucket) {
   if (!SB_KEY) return null;
   const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), ms);
   try {
-    const r = await fetch(SB_URL + '/storage/v1/object/pro-sheet/' + name, { headers: sbKopf(), signal: ctrl.signal });
+    const r = await fetch(SB_URL + '/storage/v1/object/' + (bucket || 'pro-sheet') + '/' + name, { headers: sbKopf(), signal: ctrl.signal });
     if (!r.ok) return null;
     const lm = Date.parse(r.headers.get('last-modified') || ''), alter = isNaN(lm) ? null : Date.now() - lm;
     if (roh) return { buf: Buffer.from(await r.arrayBuffer()), alter };
@@ -228,7 +228,7 @@ exports.handler = async function(event, context) {
     /* Standard-Abfrage: pro-sheet-sync hat die Antwort schon fertig gerechnet */
     const standard = !teamScope && !playerScope && !modeScope && !mapScope && !brawlersScope && !statsOnly && params.diag !== '1';
     if (standard) {
-      const fertig = await ausSpeicher(vorName(filter, sinceNum), 5000, true);
+      const fertig = await ausSpeicher(vorName(filter, sinceNum), 5000, true, 'pro-public');
       if (fertig && fertig.buf.length > 100) {
         if (!cacheStore[cacheKey] || cacheStore[cacheKey].ts < now - (fertig.alter || 0)) cacheStore[cacheKey] = { gz: fertig.buf, ts: now - (fertig.alter || 0) };
         return antwort('', cacheH, fertig.buf);
@@ -238,7 +238,7 @@ exports.handler = async function(event, context) {
     const sheetUrl = process.env.GOOGLE_SHEET_URL;
     /* ?diag=1 zeigt, woran es hängt – ohne die Sheet-Adresse preiszugeben */
     if (params.diag === '1') {
-      const info = { build: 139, sheetUrlGesetzt: !!sheetUrl, supabaseKeyGesetzt: !!SB_KEY, varianten: sheetUrl ? csvUrls(sheetUrl).length : 0 };
+      const info = { build: 140, sheetUrlGesetzt: !!sheetUrl, supabaseKeyGesetzt: !!SB_KEY, varianten: sheetUrl ? csvUrls(sheetUrl).length : 0 };
       const t0 = Date.now();
       const [st, kopie] = await Promise.all([ausSpeicher('status.json', 3000), csvKopie(6000)]);
       try { info.letzterSync = st ? JSON.parse(st.text) : null; } catch (e) { info.letzterSync = null; }
@@ -257,7 +257,7 @@ exports.handler = async function(event, context) {
           info.auswertung = { ok: true, partien: res.totalParsed, zurueck: res.matches.length, mb: Math.round((res.returnedBytes || 0) / 104857.6) / 10, ms: Date.now() - t2 };
         } catch (e) { info.auswertung = { ok: false, fehler: e.message }; }
       }
-      const vor = await ausSpeicher(vorName('all', parseInt(params.since, 10) || 0), 4000, true);
+      const vor = await ausSpeicher(vorName('all', parseInt(params.since, 10) || 0), 4000, true, 'pro-public');
       info.vorgerechnet = vor ? { kb: Math.round(vor.buf.length / 1024), alterMin: vor.alter != null ? Math.round(vor.alter / 6e4) : null } : null;
       info.msGesamt = Date.now() - t0;
       return { statusCode: 200, headers: Object.assign({}, headers, { 'Cache-Control': 'no-store' }), body: JSON.stringify(info) };
