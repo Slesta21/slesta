@@ -5,6 +5,7 @@
  */
 
 /* Per-filter cache: { all: {data, ts}, teamsOnly: {data, ts} } */
+const zlib = require('zlib');
 let cacheStore = {};
 /* Das Sheet aktualisiert sich alle fuenf Minuten. Bei dreissig Minuten
    Haltbarkeit stand oben ein Stand von vor Stunden — der Zwischen-
@@ -54,17 +55,20 @@ async function holeEinmal(url, ms) {
 const SB_URL = (process.env.SUPABASE_URL || 'https://ddtnhnwdszeddegctlag.supabase.co').replace(/\/$/, '');
 const SB_KEY = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_KEY || '').trim();
 function sbKopf() { return Object.assign({ apikey: SB_KEY }, /^eyJ/.test(SB_KEY) ? { Authorization: 'Bearer ' + SB_KEY } : {}); }
-async function ausSpeicher(name, ms) {
+async function ausSpeicher(name, ms, roh) {
   if (!SB_KEY) return null;
   const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), ms);
   try {
     const r = await fetch(SB_URL + '/storage/v1/object/pro-sheet/' + name, { headers: sbKopf(), signal: ctrl.signal });
     if (!r.ok) return null;
-    const text = await r.text();
-    const lm = Date.parse(r.headers.get('last-modified') || '');
-    return { text, alter: isNaN(lm) ? null : Date.now() - lm };
+    const lm = Date.parse(r.headers.get('last-modified') || ''), alter = isNaN(lm) ? null : Date.now() - lm;
+    if (roh) return { buf: Buffer.from(await r.arrayBuffer()), alter };
+    if (/\.gz$/.test(name)) return { text: zlib.gunzipSync(Buffer.from(await r.arrayBuffer())).toString('utf8'), alter };
+    return { text: await r.text(), alter };
   } catch (e) { return null; } finally { clearTimeout(timer); }
 }
+/* CSV-Kopie: neu gzip-komprimiert, sonst die alte unkomprimierte */
+async function csvKopie(ms) { return (await ausSpeicher('latest.csv.gz', ms)) || (await ausSpeicher('latest.csv', ms)); }
 let csvQuelle = null;
 async function vonGoogle(sheetUrl, budget) {
   const urls = csvUrls(sheetUrl), start = Date.now();
@@ -82,7 +86,7 @@ async function fetchCSV(sheetUrl, force) {
   if (!force && csvFetching) return csvFetching;
   csvFetching = (async () => {
     try {
-      const kopie = await ausSpeicher('latest.csv', 4000);
+      const kopie = await csvKopie(6000);
       /* frische Kopie (unter 8 Min.) reicht – Google nicht abwarten */
       if (!force && kopie && kopie.alter != null && kopie.alter < 8 * 60e3) {
         csvCache = kopie.text; csvCacheTs = Date.now(); csvQuelle = { von: 'speicher', alterSek: Math.round(kopie.alter / 1000) };
@@ -143,6 +147,29 @@ function resolveModeCode(mode) {
    modes before this limit kicks in, so 6000 useful matches > 6000 mixed. */
 const MAX_MATCHES_RETURNED = 6000;
 
+/* Antwort-Objekt – auch von pro-sheet-sync zum Vorrechnen benutzt */
+function vorName(filter, sinceNum) { return 'resp-' + (filter === 'teams' ? 'teams' : 'all') + '-' + (sinceNum || 0) + '.json.gz'; }
+function baueDaten(csvText, filter, teamScope, playerScope, modeScope, mapScope, brawlersScope, sinceNum, statsOnly) {
+  const result = parseAndAggregate(csvText, filter, teamScope, playerScope, modeScope, mapScope, brawlersScope, sinceNum, statsOnly);
+  return {
+    lastUpdate: new Date().toISOString(),
+    totalMatches: result.totalParsed,
+    filter: filter,
+    stats: result.stats,
+    matches: result.matches,
+    brawlerPlayers: result.brawlerPlayers,
+    raw: result.raw || null,
+    fnVersion: result.fnVersion || null,
+    truncated: !!result.truncated,
+    statsForNewest: (result.statsForNewest === undefined ? null : result.statsForNewest),
+    returnedBytes: result.returnedBytes || null
+  };
+}
+exports.baueDaten = baueDaten;
+exports.vorName = vorName;
+exports.csvUrls = csvUrls;
+exports.holeEinmal = holeEinmal;
+
 exports.handler = async function(event, context) {
   const headers = {
     'Access-Control-Allow-Origin': '*',
@@ -152,6 +179,20 @@ exports.handler = async function(event, context) {
 
   if (event.httpMethod === 'OPTIONS') {
     return { statusCode: 204, headers, body: '' };
+  }
+  /* Die Antwort mit 6000 Partien ist gut 5 MB gross – Netlify erlaubt 6 MB
+     inklusive Verpackung, das ging zuletzt nicht mehr durch. Komprimiert
+     sind es rund 1 MB. */
+  const eh = event.headers || {};
+  const gzipOk = /gzip/i.test(eh['accept-encoding'] || eh['Accept-Encoding'] || '');
+  function antwort(body, cache, gz) {
+    const h = Object.assign({}, headers, { 'Cache-Control': cache, Vary: 'Accept-Encoding' });
+    if (gzipOk && (gz || body.length > 2048)) {
+      h['Content-Encoding'] = 'gzip';
+      return { statusCode: 200, headers: h, isBase64Encoded: true, body: (gz || zlib.gzipSync(body, { level: 5 })).toString('base64') };
+    }
+    if (!body && gz) body = zlib.gunzipSync(gz).toString('utf8');
+    return { statusCode: 200, headers: h, body };
   }
 
   try {
@@ -179,25 +220,36 @@ exports.handler = async function(event, context) {
     if (sinceNum) cacheKey += ':since:' + sinceNum;
     if (statsOnly) cacheKey += ':stats';
 
-    if (!fresh && cacheStore[cacheKey] && (now - cacheStore[cacheKey].ts) < CACHE_TTL) {
-      return { statusCode: 200, headers: Object.assign({}, headers, { 'Cache-Control': fresh ? 'no-store' : 'public, max-age=120, stale-while-revalidate=120' }), body: JSON.stringify(cacheStore[cacheKey].data) };
+    const cacheH = fresh ? 'no-store' : 'public, max-age=120, stale-while-revalidate=120';
+    if (!fresh && params.diag !== '1' && cacheStore[cacheKey] && (now - cacheStore[cacheKey].ts) < CACHE_TTL) {
+      const c = cacheStore[cacheKey];
+      return c.gz ? antwort('', cacheH, c.gz) : antwort(JSON.stringify(c.data), cacheH);
+    }
+    /* Standard-Abfrage: pro-sheet-sync hat die Antwort schon fertig gerechnet */
+    const standard = !teamScope && !playerScope && !modeScope && !mapScope && !brawlersScope && !statsOnly && params.diag !== '1';
+    if (standard) {
+      const fertig = await ausSpeicher(vorName(filter, sinceNum), 5000, true);
+      if (fertig && fertig.buf.length > 100) {
+        if (!cacheStore[cacheKey] || cacheStore[cacheKey].ts < now - (fertig.alter || 0)) cacheStore[cacheKey] = { gz: fertig.buf, ts: now - (fertig.alter || 0) };
+        return antwort('', cacheH, fertig.buf);
+      }
     }
 
     const sheetUrl = process.env.GOOGLE_SHEET_URL;
     /* ?diag=1 zeigt, woran es hängt – ohne die Sheet-Adresse preiszugeben */
     if (params.diag === '1') {
-      const info = { build: 138, sheetUrlGesetzt: !!sheetUrl, supabaseKeyGesetzt: !!SB_KEY, varianten: sheetUrl ? csvUrls(sheetUrl).length : 0 };
+      const info = { build: 139, sheetUrlGesetzt: !!sheetUrl, supabaseKeyGesetzt: !!SB_KEY, varianten: sheetUrl ? csvUrls(sheetUrl).length : 0 };
       const t0 = Date.now();
-      const [st, kopie] = await Promise.all([ausSpeicher('status.json', 3000), ausSpeicher('latest.csv', 4000)]);
+      const [st, kopie] = await Promise.all([ausSpeicher('status.json', 3000), csvKopie(6000)]);
       try { info.letzterSync = st ? JSON.parse(st.text) : null; } catch (e) { info.letzterSync = null; }
       info.kopie = kopie ? { kb: Math.round(kopie.text.length / 1024), alterMin: kopie.alter != null ? Math.round(kopie.alter / 6e4) : null } : null;
       if (sheetUrl) {
         const t1 = Date.now();
-        try { const text = await vonGoogle(sheetUrl, 7000); info.google = { ok: true, kb: Math.round(text.length / 1024), ms: Date.now() - t1 }; }
+        try { const text = await vonGoogle(sheetUrl, 4000); info.google = { ok: true, kb: Math.round(text.length / 1024), ms: Date.now() - t1 }; }
         catch (e) { info.google = { ok: false, fehler: e.code || e.message, ms: Date.now() - t1 }; }
       }
       const quelle = (info.google && info.google.ok) || kopie;
-      if (quelle) {
+      if (quelle && params.voll === '1') {
         try {
           const t2 = Date.now();
           const text = kopie && (!info.google || !info.google.ok) ? kopie.text : await fetchCSV(sheetUrl, false);
@@ -205,6 +257,8 @@ exports.handler = async function(event, context) {
           info.auswertung = { ok: true, partien: res.totalParsed, zurueck: res.matches.length, mb: Math.round((res.returnedBytes || 0) / 104857.6) / 10, ms: Date.now() - t2 };
         } catch (e) { info.auswertung = { ok: false, fehler: e.message }; }
       }
+      const vor = await ausSpeicher(vorName('all', parseInt(params.since, 10) || 0), 4000, true);
+      info.vorgerechnet = vor ? { kb: Math.round(vor.buf.length / 1024), alterMin: vor.alter != null ? Math.round(vor.alter / 6e4) : null } : null;
       info.msGesamt = Date.now() - t0;
       return { statusCode: 200, headers: Object.assign({}, headers, { 'Cache-Control': 'no-store' }), body: JSON.stringify(info) };
     }
@@ -214,36 +268,17 @@ exports.handler = async function(event, context) {
     }
 
     const csvText = await fetchCSV(sheetUrl, fresh);
-    const result = parseAndAggregate(csvText, filter, teamScope, playerScope, modeScope, mapScope, brawlersScope, sinceNum, statsOnly);
-
-    /* Die Antwort wurde hier Feld fuer Feld neu gebaut. Alles, was
-       parseAndAggregate zusaetzlich liefert, fiel dabei still unter den
-       Tisch — deshalb kamen die Rohzaehler und die Fassungsnummer nie
-       an, und die Diagnose behauptete, die Funktion sei veraltet.
-       Jetzt werden die bekannten Felder gesetzt und der Rest
-       durchgereicht. */
-    const data = {
-      lastUpdate: new Date().toISOString(),
-      totalMatches: result.totalParsed,
-      filter: filter,
-      stats: result.stats,
-      matches: result.matches,
-      brawlerPlayers: result.brawlerPlayers,
-      raw: result.raw || null,
-      fnVersion: result.fnVersion || null,
-      truncated: !!result.truncated,
-      statsForNewest: (result.statsForNewest === undefined ? null : result.statsForNewest),
-      returnedBytes: result.returnedBytes || null,
-      quelle: csvQuelle
-    };
+    const data = baueDaten(csvText, filter, teamScope, playerScope, modeScope, mapScope, brawlersScope, sinceNum, statsOnly);
+    data.quelle = csvQuelle;
     cacheStore[cacheKey] = { data: data, ts: now };
+    return antwort(JSON.stringify(data), cacheH);
 
-    return { statusCode: 200, headers: Object.assign({}, headers, { 'Cache-Control': fresh ? 'no-store' : 'public, max-age=120, stale-while-revalidate=120' }), body: JSON.stringify(data) };
 
   } catch (error) {
     console.error('Function error:', error.message);
     /* Google hakt: lieber den letzten guten Stand zeigen als gar nichts */
     const k = Object.keys(cacheStore).find(x => x === ((event.queryStringParameters || {}).filter === 'teams' ? 'teams' : 'all')) || Object.keys(cacheStore)[0];
+    if (k && cacheStore[k] && cacheStore[k].gz) return antwort('', 'no-store', cacheStore[k].gz);
     if (k && cacheStore[k]) {
       const alt = Object.assign({}, cacheStore[k].data, { stale: true, staleSeit: new Date(cacheStore[k].ts).toISOString(), staleGrund: error.code || error.message });
       return { statusCode: 200, headers: Object.assign({}, headers, { 'Cache-Control': 'no-store' }), body: JSON.stringify(alt) };
