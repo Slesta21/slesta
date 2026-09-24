@@ -140,12 +140,43 @@ async function rankedVerlauf(tag) {
   catch (e) { rankedFehler(e); return []; }
 }
 
+/* Elo der Mitspieler und Gegner: einmal während das Set läuft (vorher) und direkt nach dem Set-Ende (nachher)
+   aus ihrem Profil festhalten → daraus ergibt sich ihre genaue Elo-Änderung für dieses Set. */
+async function andereElo(zeilen) {
+  if (!RANKED_OK) return;
+  const rk = zeilen.filter(z => z.typ === 'soloRanked').sort((a, b) => a.bt < b.bt ? 1 : -1);
+  if (!rk.length) return;
+  const key = z => (z.opp || []).map(p => p.t).sort().join(',');
+  const set = [];
+  for (const z of rk) {
+    if (set.length && (key(z) !== key(set[0]) || Date.parse(set[set.length - 1].bt) - Date.parse(z.bt) > 25 * 6e4)) break;
+    set.push(z);
+  }
+  let w = 0, l = 0;
+  set.forEach(z => { if (z.result === 'victory') w++; else if (z.result === 'defeat') l++; });
+  const fertig = w >= 2 || l >= 2, ende = Date.parse(set[0].bt), start = Date.parse(set[set.length - 1].bt) - 5 * 6e4;
+  if (fertig && Date.now() - ende > 20 * 6e4) return;
+  const tags = [...new Set([].concat(...set.map(z => (z.team || []).concat(z.opp || []).map(p => normTag(p.t)))))].filter(t => TAG_OK.test(t));
+  if (!tags.length) return;
+  let da;
+  try { da = await sb('bs_ranked?tag=in.(' + tags.join(',') + ')&t=gte.' + encodeURIComponent(new Date(fertig ? ende : start).toISOString()) + '&select=tag'); }
+  catch (e) { rankedFehler(e); return; }
+  const hat = new Set((da || []).map(r => r.tag));
+  await Promise.all(tags.filter(t => !hat.has(t)).slice(0, 5).map(async t => {
+    try {
+      const r = rankedAus(await bs('/players/%23' + t, 4000));
+      if (r) await sb('bs_ranked', { method: 'POST', body: [Object.assign({ tag: t, t: new Date().toISOString() }, r)], headers: { Prefer: 'return=minimal' } });
+    } catch (e) { rankedFehler(e); }
+  }));
+}
+
 /* Holt Profil + Battlelog und speichert alles. Gibt das Profil zurück. */
 async function syncTag(tag, mitProfil, vorab) {
   const log = await bs('/players/%23' + tag + '/battlelog');
   const zeilen = (log.items || []).map(it => spiel(it, tag)).filter(Boolean);
   const meta = (log.items || []).map(it => metaZeile(it, tag)).filter(Boolean);
   await Promise.all([zeilen.length ? battlesSpeichern(zeilen) : null, metaSpeichern(meta).catch(() => 0)]);
+  await andereElo(zeilen).catch(() => 0);
   let profil = null;
   const upd = { last_fetch: new Date().toISOString(), fails: 0 };
   /* Profil (für die Elo) auch dann holen, wenn seit dem letzten Elo-Stand Ranked gespielt wurde */
@@ -344,9 +375,22 @@ exports.handler = async (event) => {
       battles.push.apply(battles, teil || []);
       if (!teil || teil.length < 1000) break;
     }
+    /* Elo-Schnappschüsse der Mitspieler und Gegner aus den letzten 14 Tagen (für die Elo-Änderung pro Set) */
+    let rankedAndere = {};
+    if (RANKED_OK) {
+      const grenze14 = Date.now() - 14 * 864e5, andere = new Set();
+      battles.forEach(b => { if (b.typ === 'soloRanked' && Date.parse(b.bt) >= grenze14) (b.team || []).concat(b.opp || []).forEach(p => { const t = normTag(p.t); if (TAG_OK.test(t)) andere.add(t); }); });
+      const liste = [...andere].slice(0, 250);
+      if (liste.length) {
+        try {
+          const rows = await sb('bs_ranked?tag=in.(' + liste.join(',') + ')&t=gte.' + encodeURIComponent(new Date(grenze14).toISOString()) + '&select=tag,t,elo&order=t.asc&limit=5000');
+          (rows || []).forEach(r => { (rankedAndere[r.tag] = rankedAndere[r.tag] || []).push([r.t, r.elo]); });
+        } catch (e) { rankedFehler(e); }
+      }
+    }
     const pr = (prow && prow[0]) || {};
     if (!player) player = { tag, name: pr.name, trophies: pr.trophies, highest: pr.highest, level: pr.level, club: pr.club, icon: pr.icon, wins3: pr.wins3, solo: pr.solo, duo: pr.duo, brawlers: pr.brawlers || [] };
-    return aus(200, { speicher: true, seit: pr.added_at, letzte: pr.last_fetch, player, battles, daily: daily || [], ranked, rankedVerlauf: rkVerlauf });
+    return aus(200, { speicher: true, seit: pr.added_at, letzte: pr.last_fetch, player, battles, daily: daily || [], ranked, rankedVerlauf: rkVerlauf, rankedAndere });
   } catch (e) {
     const st = e.status;
     if (st === 404) return aus(404, { error: 'not-found' });
